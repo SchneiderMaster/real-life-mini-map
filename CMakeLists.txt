@@ -11,7 +11,7 @@ find_package(EXPAT REQUIRED)
 find_package(BZip2 REQUIRED)
 find_package(X11 REQUIRED)
 
-set(PROTOZERO_INCLUDE_DIR "/home/fynn/real-life-mini-map/include")
+set(PROTOZERO_INCLUDE_DIR "./include")
 include_directories("${PROTOZERO_INCLUDE_DIR}")
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 find_package(Osmium REQUIRED COMPONENTS pbf xml io)
