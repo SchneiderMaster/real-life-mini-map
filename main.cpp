@@ -32,14 +32,14 @@ struct Position {
 struct CachedWay {
     uint32_t start_index = 0;
     uint16_t node_count = 0;
-    uint8_t tagMap = 0;
+    uint8_t tagMap = 0; 
 };
 
-// Globaler Cache geschützt durch Mutex
 std::vector<Position> global_node_pool;
 std::vector<CachedWay> map_cache;
 std::mutex cache_mutex;
 std::atomic<bool> is_updating{false};
+std::atomic<bool> needs_redraw{true}; // Steuert die CPU-Last
 
 struct NodeEntry {
     osmium::object_id_type id;
@@ -129,12 +129,9 @@ struct TestHandler : public osmium::handler::Handler {
 
 void backgroundUpdateTask(Position p, double radius) {
     is_updating = true;
-    std::cout << "[Thread] Starting background update..." << std::endl;
-
     std::vector<Position> thread_pool;
     std::vector<CachedWay> thread_cache;
 
-    // Erstelle Box für den Handler
     const double earth_radius = 6371000.0;
     const double M_PI_CONST = 3.14159265358979323846;
     double lat_offset = (radius / earth_radius) * (180.0 / M_PI_CONST);
@@ -162,17 +159,15 @@ void backgroundUpdateTask(Position p, double radius) {
         }
         reader.close();
 
-        // Atomarer Austausch
         {
             std::lock_guard<std::mutex> lock(cache_mutex);
             global_node_pool = std::move(thread_pool);
             map_cache = std::move(thread_cache);
         }
-        std::cout << "[Thread] Update complete. Cache size: " << map_cache.size() << std::endl;
-    } catch (const std::exception& e) {
-        std::cerr << "[Thread] Error: " << e.what() << std::endl;
-    }
+        needs_redraw = true;
+    } catch (...) {}
     is_updating = false;
+    needs_redraw = true;
 }
 
 // --- RENDERING ---
@@ -214,10 +209,9 @@ void render(Display *display, Pixmap pixmap, GC gc, double center_lat, double ce
         }
     }
 
-    // Kleiner Indikator oben links wenn der Thread arbeitet
     if (is_updating) {
-        XSetForeground(display, gc, 0xFF0000);
-        XFillArc(display, pixmap, gc, 10, 10, 10, 10, 0, 360 * 64);
+        XSetForeground(display, gc, 0x2ECC71); 
+       XFillArc(display, pixmap, gc, WINDOW_WIDTH - 30, 20, 12, 12, 0, 360 * 64);
     }
 }
 
@@ -232,27 +226,37 @@ int main() {
     GC gc = XCreateGC(display, window, 0, NULL);
     Pixmap pixmap = XCreatePixmap(display, window, WINDOW_WIDTH, WINDOW_HEIGHT, DefaultDepth(display, DefaultScreen(display)));
 
-    Position p{54.3603481, 10.2850605};
+    Position p{54.3603481, 10.2850605}; 
     Position previous = p;
     double cache_radius = 2000;
     double render_radius = 500;
 
-    // Initiales Laden (noch im Hauptthread für den ersten Frame)
     backgroundUpdateTask(p, cache_radius);
 
     XEvent event;
     while (1) {
-        // Wir nutzen XPending um die Loop nicht zu blockieren, falls kein Event da ist
+        // Wenn keine Events da sind, schläft der Thread kurz, statt die CPU zu grillen
+        if (!XPending(display) && !needs_redraw) {
+            usleep(10000); // 10ms schlafen spart massiv CPU
+            continue;
+        }
+
         while (XPending(display)) {
             XNextEvent(display, &event);
+            if (event.type == Expose) {
+                needs_redraw = true;
+            }
             if (event.type == KeyPress) {
                 KeySym keysym = XLookupKeysym(&event.xkey, 0);
-                if (keysym == XK_w) p.x += 0.0002;
-                else if (keysym == XK_s) p.x -= 0.0002;
-                else if (keysym == XK_a) p.y -= 0.0002;
-                else if (keysym == XK_d) p.y += 0.0002;
+                float step = 0.0002;
+                if (keysym == XK_w) p.x += step;
+                else if (keysym == XK_s) p.x -= step;
+                else if (keysym == XK_a) p.y -= step;
+                else if (keysym == XK_d) p.y += step;
+                else if (keysym == XK_Escape) return 0;
 
-                // Prüfe ob Distanz zum letzten Cache-Update > 1000m
+                needs_redraw = true;
+
                 double dist = osmium::geom::haversine::distance(osmium::geom::Coordinates(previous.y, previous.x), 
                                                                 osmium::geom::Coordinates(p.y, p.x));
                 if (dist > 1000 && !is_updating) {
@@ -262,14 +266,14 @@ int main() {
             }
         }
 
-        // Zeichnen (auf Pixmap, dann CopyArea)
-        XSetForeground(display, gc, WhitePixel(display, DefaultScreen(display)));
-        XFillRectangle(display, pixmap, gc, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
-        render(display, pixmap, gc, p.x, p.y, render_radius);
-        XCopyArea(display, pixmap, window, gc, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, 0, 0);
-        XFlush(display);
-
-        usleep(16000); // ca. 60 FPS
+        if (needs_redraw) {
+            XSetForeground(display, gc, 0xFDFEFE); 
+            XFillRectangle(display, pixmap, gc, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
+            render(display, pixmap, gc, p.x, p.y, render_radius);
+            XCopyArea(display, pixmap, window, gc, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, 0, 0);
+            XFlush(display);
+            needs_redraw = false; // Wir sind fertig mit zeichnen
+        }
     }
 
     XFreeGC(display, gc);
