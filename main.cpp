@@ -17,8 +17,8 @@
 #include <X11/Xutil.h>
 #include <unistd.h>
 
-#define WINDOW_HEIGHT 800
-#define WINDOW_WIDTH 800
+#define WINDOW_HEIGHT 1000
+#define WINDOW_WIDTH 1000
 
 struct Point {
     int x, y;
@@ -93,7 +93,8 @@ struct TestHandler : public osmium::handler::Handler {
     void way(const osmium::Way &way) {
         const char *highway = way.tags()["highway"];
         const char *waterway = way.tags()["waterway"];
-        if (highway || waterway) {
+        const char *building = way.tags()["building"];
+        if (highway || waterway || building) {
             bool any_node_in_box = false;
             for (const auto& node : way.nodes()) {
                 if (node.location().valid() && bounding_box.contains(node.location())) {
@@ -116,7 +117,10 @@ struct TestHandler : public osmium::handler::Handler {
                     c.tagMap |= 1;
                 } else if (highway) {
                     c.tagMap |= 1 << 1;
-                } else if (way.tags().has_tag("waterway", "river")) {
+                } else if (building) {
+                    c.tagMap |= 1 << 4;
+                }
+                else if (way.tags().has_tag("waterway", "river")) {
                     c.tagMap |= 1 << 7;
                 }
                 local_cache.push_back(std::move(c));
@@ -192,6 +196,17 @@ void render(Display *display, Pixmap pixmap, GC gc, double center_lat, double ce
     for (const auto &way : map_cache) {
         if (!way.tagMap) continue;
 
+        if(way.tagMap & (1 << 4)) {
+            XPoint points[way.node_count];
+            for (int i = 0; i < way.node_count; i++) {
+                Point p = locToPixel(bounding_box, {global_node_pool[way.start_index + i].x, global_node_pool[way.start_index + i].y});
+                points[i] = {(short)(p.x), (short)(p.y)};
+            }
+            XSetFillStyle(display, gc, FillSolid);
+            XSetForeground(display, gc, 0xE2E2E2);
+            XFillPolygon(display, pixmap, gc, points, way.node_count, Nonconvex, CoordModeOrigin);
+            continue;
+        }
         // Setze Farbe basierend auf Tags
         if (way.tagMap & 1) XSetForeground(display, gc, 0x000000); // Schwarz (Residential)
         else if (way.tagMap & (1 << 7)) XSetForeground(display, gc, 0x0000FF); // Blau (Water)
@@ -229,7 +244,7 @@ int main() {
     Position p{54.3603481, 10.2850605}; 
     Position previous = p;
     double cache_radius = 2000;
-    double render_radius = 500;
+    double render_radius = 400;
 
     backgroundUpdateTask(p, cache_radius);
 
