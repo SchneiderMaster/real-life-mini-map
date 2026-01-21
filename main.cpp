@@ -16,9 +16,11 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <unistd.h>
+#include <Imlib2.h>
+#include <stdio.h>
 
-#define WINDOW_HEIGHT 1000
-#define WINDOW_WIDTH 1000
+#define WINDOW_HEIGHT 500
+#define WINDOW_WIDTH 500
 
 struct Point {
     int x, y;
@@ -39,7 +41,7 @@ std::vector<Position> global_node_pool;
 std::vector<CachedWay> map_cache;
 std::mutex cache_mutex;
 std::atomic<bool> is_updating{false};
-std::atomic<bool> needs_redraw{true}; // Steuert die CPU-Last
+std::atomic<bool> needs_redraw{true};
 
 struct NodeEntry {
     osmium::object_id_type id;
@@ -183,7 +185,7 @@ Point locToPixel(const osmium::Box &box, const osmium::Location &location) {
     return p;
 }
 
-void render(Display *display, Pixmap pixmap, GC gc, double center_lat, double center_lon, double radius_m) {
+void render_map(Display *display, Pixmap pixmap, GC gc, double center_lat, double center_lon, double radius_m) {
     const double earth_radius = 6371000.0;
     const double M_PI_CONST = 3.14159265358979323846;
     double lat_offset = (radius_m / earth_radius) * (180.0 / M_PI_CONST);
@@ -197,62 +199,111 @@ void render(Display *display, Pixmap pixmap, GC gc, double center_lat, double ce
         if (!way.tagMap) continue;
 
         if(way.tagMap & (1 << 4)) {
-            XPoint points[way.node_count];
+            std::vector<XPoint> points(way.node_count);
             for (int i = 0; i < way.node_count; i++) {
                 Point p = locToPixel(bounding_box, {global_node_pool[way.start_index + i].x, global_node_pool[way.start_index + i].y});
                 points[i] = {(short)(p.x), (short)(p.y)};
             }
             XSetFillStyle(display, gc, FillSolid);
-            XSetForeground(display, gc, 0xE2E2E2);
-            XFillPolygon(display, pixmap, gc, points, way.node_count, Nonconvex, CoordModeOrigin);
+            XSetForeground(display, gc, 0x969696);
+            XFillPolygon(display, pixmap, gc, points.data(), way.node_count, Nonconvex, CoordModeOrigin);
             continue;
         }
-        // Setze Farbe basierend auf Tags
-        if (way.tagMap & 1) XSetForeground(display, gc, 0x000000); // Schwarz (Residential)
-        else if (way.tagMap & (1 << 7)) XSetForeground(display, gc, 0x0000FF); // Blau (Water)
-        else XSetForeground(display, gc, 0xCCCCCC); // Grau (Other)
 
-        for (int i = 0; i < way.node_count - 1; i++) {
-            Position p1 = global_node_pool[way.start_index + i];
-            Position p2 = global_node_pool[way.start_index + i + 1];
-
-            if (bounding_box.contains({p1.x, p1.y}) || bounding_box.contains({p2.x, p2.y})) {
-                Point one = locToPixel(bounding_box, {p1.x, p1.y});
-                Point two = locToPixel(bounding_box, {p2.x, p2.y});
-                XDrawLine(display, pixmap, gc, one.x, one.y, two.x, two.y);
-            }
+        if (way.tagMap & 1) { XSetForeground(display, gc, 0xFFFFFF); 
+            XSetLineAttributes(display, gc, 7, 0, 0, 0);
         }
+        else if (way.tagMap & (1 << 7)){
+            XSetForeground(display, gc, 0x0000FF);
+        }
+        else{ XSetForeground(display, gc, 0xD16E5B); 
+            XSetLineAttributes(display, gc, 4, 0, 0, 0);
+            
+        }
+        XPoint points[way.node_count];
+        for (int i = 0; i < way.node_count; i++) {
+            Point p = locToPixel(bounding_box, {global_node_pool[way.start_index + i].x, global_node_pool[way.start_index + i].y});
+            points[i] = {(short)(p.x), (short)(p.y)};
+        }
+        XDrawLines(display, pixmap, gc, points, way.node_count, CoordModeOrigin);
+
+
+        // for (int i = 0; i < (int)way.node_count - 1; i++) {
+        //     Position p1 = global_node_pool[way.start_index + i];
+        //     Position p2 = global_node_pool[way.start_index + i + 1];
+
+        //     if (bounding_box.contains({p1.x, p1.y}) || bounding_box.contains({p2.x, p2.y})) {
+        //         Point one = locToPixel(bounding_box, {p1.x, p1.y});
+        //         Point two = locToPixel(bounding_box, {p2.x, p2.y});
+        //         XDrawLine(display, pixmap, gc, one.x, one.y, two.x, two.y);
+        //     }
+        // }
+                XSetLineAttributes(display, gc, 1, 0, 0, 0);
     }
 
     if (is_updating) {
         XSetForeground(display, gc, 0x2ECC71); 
-       XFillArc(display, pixmap, gc, WINDOW_WIDTH - 30, 20, 12, 12, 0, 360 * 64);
+        XFillArc(display, pixmap, gc, WINDOW_WIDTH - 30, 20, 12, 12, 0, 360 * 64);
     }
+}
+
+// Neue Funktion zum Zeichnen mit Alpha-Blending via Imlib2
+void draw_image_alpha(Display *dpy, Pixmap target, Imlib_Image src_img, int x, int y, int scaleX, int scaleY) {
+    if (!src_img) return;
+
+    imlib_context_set_image(src_img);
+
+    imlib_context_set_display(dpy);
+    imlib_context_set_visual(DefaultVisual(dpy, DefaultScreen(dpy)));
+    imlib_context_set_colormap(DefaultColormap(dpy, DefaultScreen(dpy)));
+    imlib_context_set_drawable(target);
+    
+    // Blend-Modus aktivieren (das ist der entscheidende Teil für Transparenz)
+    imlib_context_set_blend(1);
+    
+    // Rendert das Bild an Position (x, y) auf die Pixmap
+    // Zentriert: (WINDOW_WIDTH - w)/2
+    imlib_render_image_on_drawable_at_size(x, y, scaleX, scaleY);
 }
 
 int main() {
     Display *display = XOpenDisplay(0);
     if (!display) return -1;
 
+    int screen = DefaultScreen(display);
     Window window = XCreateSimpleWindow(display, DefaultRootWindow(display), 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, 0,
-                                        BlackPixel(display, DefaultScreen(display)), WhitePixel(display, DefaultScreen(display)));
+                                        BlackPixel(display, screen), WhitePixel(display, screen));
+    
     XSelectInput(display, window, ExposureMask | KeyPressMask);
     XMapWindow(display, window);
+    
     GC gc = XCreateGC(display, window, 0, NULL);
-    Pixmap pixmap = XCreatePixmap(display, window, WINDOW_WIDTH, WINDOW_HEIGHT, DefaultDepth(display, DefaultScreen(display)));
+    Pixmap pixmap = XCreatePixmap(display, window, WINDOW_WIDTH, WINDOW_HEIGHT, DefaultDepth(display, screen));
+
+    // Wir laden das Bild als Imlib_Image und behalten es so (für Alpha Support)
+    Imlib_Image playerArrowImg = imlib_load_image("./resources/fh4_player_arrow.png");
+    if (!playerArrowImg) {
+        fprintf(stderr, "Fehler: Bild konnte nicht geladen werden.\n");
+        return -1;
+    }
+    
+    int arrowWidth = 42;
+    int arrowHeight = 42;
+
+    Imlib_Image vingetteImg = imlib_load_image("./resources/vingette.png");
 
     Position p{54.3603481, 10.2850605}; 
     Position previous = p;
     double cache_radius = 2000;
-    double render_radius = 400;
+    double render_radius = 150;
 
+    // Erster Fetch
     backgroundUpdateTask(p, cache_radius);
 
     XEvent event;
     while (1) {
-        // Wenn keine Events da sind, schläft der Thread kurz, statt die CPU zu grillen
         if (!XPending(display) && !needs_redraw) {
-            usleep(10000); // 10ms schlafen spart massiv CPU
+            usleep(10000); 
             continue;
         }
 
@@ -268,7 +319,7 @@ int main() {
                 else if (keysym == XK_s) p.x -= step;
                 else if (keysym == XK_a) p.y -= step;
                 else if (keysym == XK_d) p.y += step;
-                else if (keysym == XK_Escape) return 0;
+                else if (keysym == XK_Escape) goto cleanup;
 
                 needs_redraw = true;
 
@@ -282,16 +333,38 @@ int main() {
         }
 
         if (needs_redraw) {
-            XSetForeground(display, gc, 0xFDFEFE); 
+            // 1. Hintergrund löschen
+            XSetForeground(display, gc, 0x0A0A11); 
             XFillRectangle(display, pixmap, gc, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
-            render(display, pixmap, gc, p.x, p.y, render_radius);
+            
+            // 2. Map rendern
+            render_map(display, pixmap, gc, p.x, p.y, render_radius);
+            
+            // 3. Player Arrow mit Transparenz drüberblenden
+            draw_image_alpha(display, pixmap, playerArrowImg, 
+                             (WINDOW_WIDTH - arrowWidth) / 2, 
+                             (WINDOW_HEIGHT - arrowHeight) / 2,
+                             arrowWidth, arrowHeight);
+
+            draw_image_alpha(display, pixmap, vingetteImg,
+                             0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
+            
+            XSetForeground(display, gc, 0x969696);
+            XSetLineAttributes(display, gc, 2, 0, 0, 0);
+            XDrawArc(display, pixmap, gc, 0, 0, WINDOW_WIDTH-2, WINDOW_HEIGHT-2, 120 * 64, 300 * 64);
+            
+            // 4. Backbuffer auf Window kopieren
             XCopyArea(display, pixmap, window, gc, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT, 0, 0);
             XFlush(display);
-            needs_redraw = false; // Wir sind fertig mit zeichnen
+            needs_redraw = false;
         }
     }
 
+cleanup:
+    imlib_context_set_image(playerArrowImg);
+    imlib_free_image();
     XFreeGC(display, gc);
+    XFreePixmap(display, pixmap);
     XCloseDisplay(display);
     return 0;
 }
