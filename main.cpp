@@ -96,6 +96,9 @@ struct TestHandler : public osmium::handler::Handler {
         const char *highway = way.tags()["highway"];
         const char *waterway = way.tags()["waterway"];
         const char *building = way.tags()["building"];
+        if(way.tags().has_tag("highway", "footway") || way.tags().has_tag("highway", "path")) {
+            return;
+        }
         if (highway || waterway || building) {
             bool any_node_in_box = false;
             for (const auto& node : way.nodes()) {
