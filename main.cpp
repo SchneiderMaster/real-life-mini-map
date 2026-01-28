@@ -56,6 +56,98 @@ struct NodeEntry
     bool operator<(const NodeEntry &other) const { return id < other.id; }
 };
 
+// Navigation
+
+// 8 byte
+// 4 + 4 byte
+
+// 8 byte
+// 4 byte
+// 8 byte
+
+struct RoutingNode
+{
+    osmium::object_id_type osmium_id;
+    Position p;
+    struct Edge
+    {
+        osmium::object_id_type target_id;
+        float weight;
+        osmium::object_id_type way_id;
+    };
+    std::vector<Edge> edges;
+};
+
+std::vector<RoutingNode> routingMesh;
+
+struct RoutingMeshHandler : public osmium::handler::Handler
+{
+    std::vector<osmium::object_id_type> node_refs;
+
+    bool is_relevant_highway(const osmium::Way &way)
+    {
+        const char *highway = way.tags()["highway"];
+        if (!highway)
+            return false;
+        static const std::vector<std::string> ignore = {
+            "footway", "cycleway", "path", "service", "track", "steps", "pedestrian"};
+        for (const auto &s : ignore)
+            if (s == highway)
+                return false;
+        return true;
+    }
+
+    void way(const osmium::Way &way)
+    {
+        if (!is_relevant_highway(way))
+            return;
+
+        const auto &nodes = way.nodes();
+        if (nodes.size() < 2)
+            return;
+
+        for (size_t i = 0; i < nodes.size(); ++i)
+        {
+            node_refs.push_back(nodes[i].ref());
+            if (i == 0 || i == nodes.size() - 1)
+            {
+                node_refs.push_back(nodes[i].ref());
+            }
+        }
+    }
+
+    void createMeshNodes()
+    {
+        if (node_refs.empty())
+            return;
+
+        std::sort(node_refs.begin(), node_refs.end());
+
+        for (size_t i = 0; i < node_refs.size() - 1; ++i)
+        {
+            if (node_refs[i] == node_refs[i + 1])
+            {
+                routingMesh.push_back(RoutingNode{node_refs[i], {0, 0}, {}});
+
+                osmium::object_id_type current_id = node_refs[i];
+                while (i < node_refs.size() && node_refs[i] == current_id)
+                {
+                    i++;
+                }
+                i--;
+            }
+        }
+        node_refs.clear();
+        node_refs.shrink_to_fit();
+
+        std::cout << "Mesh erstellt mit " << routingMesh.size() << " Knotenpunkten." << std::endl;
+    }
+
+    void assignLocations(const osmium::Node &node)
+    {
+    }
+};
+
 // --- HANDLER ---
 
 struct MySmartLocationHandler : public osmium::handler::Handler
@@ -314,7 +406,9 @@ void draw_image_alpha(Display *dpy, Pixmap target, Imlib_Image src_img, int x, i
     // Zentriert: (WINDOW_WIDTH - w)/2
     imlib_render_image_on_drawable_at_size(x, y, scaleX, scaleY);
 }
-void render_homes(Display *display, Pixmap pixmap, Imlib_Image houseImage, Position currentPosition, double radius_m) {
+
+void render_homes(Display *display, Pixmap pixmap, Imlib_Image houseImage, Position currentPosition, double radius_m)
+{
     const double earth_radius = 6371000.0;
     const double M_PI_CONST = 3.14159265358979323846;
     double lat_offset = (radius_m / earth_radius) * (180.0 / M_PI_CONST);
@@ -322,30 +416,33 @@ void render_homes(Display *display, Pixmap pixmap, Imlib_Image houseImage, Posit
     osmium::Box bounding_box(osmium::Location{currentPosition.y - lon_offset, currentPosition.x - lat_offset},
                              osmium::Location{currentPosition.y + lon_offset, currentPosition.x + lat_offset});
 
-    for(const Position house : homes) {
-        if(house.x == -190) {
+    for (const Position house : homes)
+    {
+        if (house.x == -190)
+        {
             continue;
         }
         Point p = locToPixel(bounding_box, osmium::Location{house.y, house.x});
         draw_image_alpha(display, pixmap, houseImage, p.x - 64, p.y - 128, 128, 128);
     }
-
 }
 
-
-
-void saveNewHome(Position *p) {
+void saveNewHome(Position *p)
+{
     bool changed = false;
-    for(int i = 0; i < MAX_HOMES; i++){
+    for (int i = 0; i < MAX_HOMES; i++)
+    {
         // -190 is no valid coordinate so this is a non-existant coordinate
-        if(homes[i].x == -190) {
+        if (homes[i].x == -190)
+        {
             homes[i] = Position{*p};
             changed = true;
             break;
         }
     }
 
-    if(!changed) {
+    if (!changed)
+    {
         std::cout << "Max Houses already reached.";
     }
 }
@@ -386,7 +483,8 @@ int main()
     double cache_radius = 2000;
     double render_radius = 150;
 
-    for(int i = 0; i < MAX_HOMES; i++){
+    for (int i = 0; i < MAX_HOMES; i++)
+    {
         homes[i] = Position{-190, 0};
     }
 
@@ -421,7 +519,8 @@ int main()
                     p.y -= step;
                 else if (keysym == XK_d)
                     p.y += step;
-                else if (keysym == XK_e) {
+                else if (keysym == XK_e)
+                {
                     saveNewHome(&p);
                 }
                 else if (keysym == XK_Escape)
@@ -458,7 +557,6 @@ int main()
 
             draw_image_alpha(display, pixmap, vingetteImg,
                              0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
-                    
 
             XSetForeground(display, gc, 0x969696);
             XSetLineAttributes(display, gc, 2, 0, 0, 0);
@@ -480,7 +578,6 @@ cleanup:
     return 0;
 }
 
-
 /*
 NOTES FOR THE NAVIGATION SYSTEM:
 
@@ -488,7 +585,7 @@ NOTES FOR THE NAVIGATION SYSTEM:
     - only get "highway", but ignore footpaths etc.
     - possible object for each Node:
         - ID (taken from OSM)
-        - Position 
+        - Position
         - Vector of all connected Nodes with weights (distance + driving speed + ?) and corresponding original Way ID
     - all nodes get saved in an ordered array for easy lookup via e.g. binary search
 
@@ -496,7 +593,7 @@ NOTES FOR THE NAVIGATION SYSTEM:
     - get all the Edges that where used -> get all the ways, load the corresponding OSM-Nodes and render them
     - all nodes should be ordered from start to finish for later use
 
-3. While driving there: 
+3. While driving there:
     - once a second: get the nearest OSM Node on path, render remaining path purple, rest normal, because we've already been there
     - once a second: check whether we are still on the path:
         - get the nearest OSM Node on path, if threshold is too big, restart at 2
