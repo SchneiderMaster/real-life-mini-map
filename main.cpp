@@ -46,6 +46,9 @@ std::mutex cache_mutex;
 std::atomic<bool> is_updating{false};
 std::atomic<bool> needs_redraw{true};
 
+#define MAX_HOMES 4
+Position homes[MAX_HOMES];
+
 struct NodeEntry
 {
     osmium::object_id_type id;
@@ -291,7 +294,6 @@ void render_map(Display *display, Pixmap pixmap, GC gc, double center_lat, doubl
         XFillArc(display, pixmap, gc, WINDOW_WIDTH - 30, 20, 12, 12, 0, 360 * 64);
     }
 }
-
 // Neue Funktion zum Zeichnen mit Alpha-Blending via Imlib2
 void draw_image_alpha(Display *dpy, Pixmap target, Imlib_Image src_img, int x, int y, int scaleX, int scaleY)
 {
@@ -311,6 +313,41 @@ void draw_image_alpha(Display *dpy, Pixmap target, Imlib_Image src_img, int x, i
     // Rendert das Bild an Position (x, y) auf die Pixmap
     // Zentriert: (WINDOW_WIDTH - w)/2
     imlib_render_image_on_drawable_at_size(x, y, scaleX, scaleY);
+}
+void render_homes(Display *display, Pixmap pixmap, Imlib_Image houseImage, Position currentPosition, double radius_m) {
+    const double earth_radius = 6371000.0;
+    const double M_PI_CONST = 3.14159265358979323846;
+    double lat_offset = (radius_m / earth_radius) * (180.0 / M_PI_CONST);
+    double lon_offset = (radius_m / (earth_radius * std::cos(currentPosition.x * M_PI_CONST / 180.0))) * (180.0 / M_PI_CONST);
+    osmium::Box bounding_box(osmium::Location{currentPosition.y - lon_offset, currentPosition.x - lat_offset},
+                             osmium::Location{currentPosition.y + lon_offset, currentPosition.x + lat_offset});
+
+    for(const Position house : homes) {
+        if(house.x == -190) {
+            continue;
+        }
+        Point p = locToPixel(bounding_box, osmium::Location{house.y, house.x});
+        draw_image_alpha(display, pixmap, houseImage, p.x - 64, p.y - 128, 128, 128);
+    }
+
+}
+
+
+
+void saveNewHome(Position *p) {
+    bool changed = false;
+    for(int i = 0; i < MAX_HOMES; i++){
+        // -190 is no valid coordinate so this is a non-existant coordinate
+        if(homes[i].x == -190) {
+            homes[i] = Position{*p};
+            changed = true;
+            break;
+        }
+    }
+
+    if(!changed) {
+        std::cout << "Max Houses already reached.";
+    }
 }
 
 int main()
@@ -342,10 +379,16 @@ int main()
 
     Imlib_Image vingetteImg = imlib_load_image("./resources/vingette.png");
 
+    Imlib_Image houseImg = imlib_load_image("./resources/house.png");
+
     Position p{54.3603481, 10.2850605};
     Position previous = p;
     double cache_radius = 2000;
     double render_radius = 150;
+
+    for(int i = 0; i < MAX_HOMES; i++){
+        homes[i] = Position{-190, 0};
+    }
 
     // Erster Fetch
     backgroundUpdateTask(p, cache_radius);
@@ -378,6 +421,9 @@ int main()
                     p.y -= step;
                 else if (keysym == XK_d)
                     p.y += step;
+                else if (keysym == XK_e) {
+                    saveNewHome(&p);
+                }
                 else if (keysym == XK_Escape)
                     goto cleanup;
 
@@ -408,8 +454,11 @@ int main()
                              (WINDOW_HEIGHT - arrowHeight) / 2,
                              arrowWidth, arrowHeight);
 
+            render_homes(display, pixmap, houseImg, p, render_radius);
+
             draw_image_alpha(display, pixmap, vingetteImg,
                              0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
+                    
 
             XSetForeground(display, gc, 0x969696);
             XSetLineAttributes(display, gc, 2, 0, 0, 0);
@@ -430,3 +479,28 @@ cleanup:
     XCloseDisplay(display);
     return 0;
 }
+
+
+/*
+NOTES FOR THE NAVIGATION SYSTEM:
+
+1. Load only all of the intersections of the map
+    - only get "highway", but ignore footpaths etc.
+    - possible object for each Node:
+        - ID (taken from OSM)
+        - Position 
+        - Vector of all connected Nodes with weights (distance + driving speed + ?) and corresponding original Way ID
+    - all nodes get saved in an ordered array for easy lookup via e.g. binary search
+
+2. When Navigation should start: Run A* from current position to target (get nearest node for each via fancy math) (new thread)
+    - get all the Edges that where used -> get all the ways, load the corresponding OSM-Nodes and render them
+    - all nodes should be ordered from start to finish for later use
+
+3. While driving there: 
+    - once a second: get the nearest OSM Node on path, render remaining path purple, rest normal, because we've already been there
+    - once a second: check whether we are still on the path:
+        - get the nearest OSM Node on path, if threshold is too big, restart at 2
+
+4. Once there: If the last node is the closest node -> finish navigation
+
+*/
