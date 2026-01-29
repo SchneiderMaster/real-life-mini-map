@@ -80,71 +80,157 @@ struct RoutingNode
 
 std::vector<RoutingNode> routingMesh;
 
-struct RoutingMeshHandler : public osmium::handler::Handler
-{
+struct RoutingMeshHandler : public osmium::handler::Handler {
     std::vector<osmium::object_id_type> node_refs;
 
-    bool is_relevant_highway(const osmium::Way &way)
-    {
-        const char *highway = way.tags()["highway"];
-        if (!highway)
-            return false;
+    bool is_relevant_highway(const osmium::Way& way) {
+        const char* highway = way.tags()["highway"];
+        if (!highway) return false;
         static const std::vector<std::string> ignore = {
-            "footway", "cycleway", "path", "service", "track", "steps", "pedestrian"};
-        for (const auto &s : ignore)
-            if (s == highway)
-                return false;
+            "footway", "cycleway", "path", "service", "track", "steps", "pedestrian"
+        };
+        for (const auto& s : ignore) if (s == highway) return false;
         return true;
     }
 
-    void way(const osmium::Way &way)
-    {
-        if (!is_relevant_highway(way))
-            return;
+    int getSpeedForWay(const osmium::Way& way) {
+        const char* maxspeed_str = way.get_value_by_key("maxspeed");
+        if (maxspeed_str) {
+            try {
+                int val = std::stoi(maxspeed_str);
+                if (val > 0) return val;
+            } catch (...) {
+                if (std::string(maxspeed_str) == "walk") return 7;
+            }
+        }
 
-        const auto &nodes = way.nodes();
-        if (nodes.size() < 2)
-            return;
+        const char* maxspeedtype = way.get_value_by_key("maxspeed:type");
+        if (maxspeedtype) {
+            std::string type = maxspeedtype;
+            if (type == "DE:rural") return 100;
+            if (type == "DE:urban") return 50;
+            if (type == "DE:motorway") return 130;
+        }
 
-        for (size_t i = 0; i < nodes.size(); ++i)
-        {
+        // Fallback basierend auf Highway-Klasse
+        const char* highway = way.get_value_by_key("highway");
+        if (highway) {
+            std::string h = highway;
+            if (h == "motorway") return 130;
+            if (h == "trunk") return 100;
+            if (h == "primary") return 100;
+            if (h == "secondary") return 80;
+            if (h == "tertiary") return 70;
+            if (h == "residential") return 30;
+            if (h == "living_street") return 7;
+        }
+
+        return 50; // Standard-Fallback
+    }
+
+    // PASS 1: Sammeln
+    void way(const osmium::Way& way) {
+        if (!is_relevant_highway(way)) return;
+        const auto& nodes = way.nodes();
+        if (nodes.size() < 2) return;
+
+        for (size_t i = 0; i < nodes.size(); ++i) {
             node_refs.push_back(nodes[i].ref());
-            if (i == 0 || i == nodes.size() - 1)
-            {
+            if (i == 0 || i == nodes.size() - 1) {
                 node_refs.push_back(nodes[i].ref());
             }
         }
     }
 
-    void createMeshNodes()
-    {
-        if (node_refs.empty())
-            return;
-
+    void createMeshNodes() {
+        if (node_refs.empty()) return;
         std::sort(node_refs.begin(), node_refs.end());
 
-        for (size_t i = 0; i < node_refs.size() - 1; ++i)
-        {
-            if (node_refs[i] == node_refs[i + 1])
-            {
-                routingMesh.push_back(RoutingNode{node_refs[i], {0, 0}, {}});
-
+        for (size_t i = 0; i < node_refs.size() - 1; ++i) {
+            if (node_refs[i] == node_refs[i+1]) {
+                routingMesh.push_back(RoutingNode{node_refs[i], {0,0}, {}});
                 osmium::object_id_type current_id = node_refs[i];
-                while (i < node_refs.size() && node_refs[i] == current_id)
-                {
-                    i++;
-                }
+                while (i < node_refs.size() && node_refs[i] == current_id) i++;
                 i--;
             }
         }
         node_refs.clear();
         node_refs.shrink_to_fit();
 
-        std::cout << "Mesh erstellt mit " << routingMesh.size() << " Knotenpunkten." << std::endl;
+        std::sort(routingMesh.begin(), routingMesh.end(), [](const RoutingNode& a, const RoutingNode& b) {
+            return a.osmium_id < b.osmium_id;
+        });
     }
 
-    void assignLocations(const osmium::Node &node)
-    {
+    void assignLocations(const osmium::Node& node) {
+        auto it = std::lower_bound(routingMesh.begin(), routingMesh.end(), node.id(), 
+            [](const RoutingNode& rn, osmium::object_id_type id) {
+                return rn.osmium_id < id;
+            });
+
+        if (it != routingMesh.end() && it->osmium_id == node.id()) {
+            it->p = { (float)node.location().lat(), (float)node.location().lon() };
+        }
+    }
+
+    RoutingNode* findInMesh(osmium::object_id_type id) {
+        auto it = std::lower_bound(routingMesh.begin(), routingMesh.end(), id,
+            [](const RoutingNode& node, osmium::object_id_type id) {
+                return node.osmium_id < id;
+            });
+        if (it != routingMesh.end() && it->osmium_id == id) {
+            return &(*it);
+        }
+        return nullptr;
+    }
+
+    void buildEdges(const osmium::Way& way) {
+        if (!is_relevant_highway(way)) return;
+
+        const auto& nodes = way.nodes();
+        if (nodes.size() < 2) return;
+
+        int speed = getSpeedForWay(way);
+        RoutingNode* lastMeshNode = nullptr;
+        double accumulatedDistance = 0.0;
+
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            RoutingNode* currentMeshNode = findInMesh(nodes[i].ref());
+
+            if (currentMeshNode) {
+                if (lastMeshNode) {
+                    // Haversine distance between the two mesh nodes (ignoring curves)
+                    osmium::Location loc1(lastMeshNode->p.y, lastMeshNode->p.x);
+                    osmium::Location loc2(currentMeshNode->p.y, currentMeshNode->p.x);
+                    
+                    if (loc1.valid() && loc2.valid()) {
+                        double dist = osmium::geom::haversine::distance(loc1, loc2);
+                        float weight = (float)(dist / (speed / 3.6)); // Time in seconds
+                        
+                        lastMeshNode->edges.push_back({currentMeshNode->osmium_id, weight, way.id()});
+                        
+                        const char* ow = way.get_value_by_key("oneway");
+                        if (!(ow && std::string(ow) == "yes")) {
+                            currentMeshNode->edges.push_back({lastMeshNode->osmium_id, weight, way.id()});
+                        }
+
+                        if(currentMeshNode->osmium_id == 43762102 || lastMeshNode->osmium_id == 437621029999999999){
+                            std::cout << "parsed your intersection\n";
+                            std::cout << currentMeshNode->osmium_id << "; " << currentMeshNode->edges.size()<<";\n";
+                           // std::cout << lastMeshNode->osmium_id << "; " << lastMeshNode->edges.size()<<";\n";
+
+                           for(const auto &edge : currentMeshNode->edges) {
+                                std::cout << edge.target_id << "; " << edge.way_id << "; " << edge.weight << ";\n";
+                           }
+                            std::cout << "\n";
+
+                            
+                        }
+                    }
+                }
+                lastMeshNode = currentMeshNode;
+            }
+        }
     }
 };
 
@@ -315,6 +401,48 @@ void backgroundUpdateTask(Position p, double radius)
     needs_redraw = true;
 }
 
+void loadRoutingMesh()
+{
+    try
+    {
+        osmium::io::Reader reader1{"./data/sh-map.pbf", osmium::osm_entity_bits::way};
+
+        RoutingMeshHandler routingMeshHandler;
+
+        while (osmium::memory::Buffer buffer = reader1.read())
+        {
+            for (auto &entity : buffer)
+            {
+                if (entity.type() == osmium::item_type::way)
+                {
+                    routingMeshHandler.way((osmium::Way &)entity);
+                }
+            }
+        }
+        reader1.close();
+        routingMeshHandler.createMeshNodes();
+
+        osmium::io::Reader reader2{"./data/sh-map.pbf", osmium::osm_entity_bits::node | osmium::osm_entity_bits::way};
+
+        while (osmium::memory::Buffer buffer = reader2.read())
+        {
+            for (auto &entity : buffer)
+            {
+                if (entity.type() == osmium::item_type::node)
+                {
+                    routingMeshHandler.assignLocations((osmium::Node &)entity);
+                } else if(entity.type() == osmium::item_type::way) {
+                    routingMeshHandler.buildEdges((osmium::Way &) entity);
+                }
+            }
+        }
+        reader2.close();
+    }
+    catch (...)
+    {
+    }
+}
+
 // --- RENDERING ---
 
 Point locToPixel(const osmium::Box &box, const osmium::Location &location)
@@ -443,7 +571,7 @@ void saveNewHome(Position *p)
 
     if (!changed)
     {
-        std::cout << "Max Houses already reached.";
+        //std::cout << "Max Houses already reached.";
     }
 }
 
@@ -490,6 +618,8 @@ int main()
 
     // Erster Fetch
     backgroundUpdateTask(p, cache_radius);
+
+    loadRoutingMesh();
 
     XEvent event;
     while (1)
@@ -572,6 +702,10 @@ int main()
 cleanup:
     imlib_context_set_image(playerArrowImg);
     imlib_free_image();
+    imlib_context_set_image(vingetteImg);
+    imlib_free_image();
+    imlib_context_set_image(houseImg);
+    imlib_free_image();
     XFreeGC(display, gc);
     XFreePixmap(display, pixmap);
     XCloseDisplay(display);
@@ -584,7 +718,7 @@ NOTES FOR THE NAVIGATION SYSTEM:
 1. Load only all of the intersections of the map
     - only get "highway", but ignore footpaths etc.
     - possible object for each Node:
-        - ID (taken from OSM)
+        - DONE: ID (taken from OSM)
         - Position
         - Vector of all connected Nodes with weights (distance + driving speed + ?) and corresponding original Way ID
     - all nodes get saved in an ordered array for easy lookup via e.g. binary search
